@@ -1,7 +1,7 @@
 name: Oracle ARM Instance Retry
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -53,7 +53,7 @@ jobs:
             sys.exit(0)
           except oci.exceptions.ServiceError as e:
             if "Out of host capacity" in str(e.message):
-              print("Still out of capacity. Will retry in 15 minutes.")
+              print("Still out of capacity. Will retry in 5 minutes.")
               sys.exit(0)
             else:
               print(f"Error: {e}")
