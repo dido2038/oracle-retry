@@ -3,62 +3,76 @@ on:
   schedule:
     - cron: '*/5 * * * *'
   workflow_dispatch:
-
 jobs:
   create-instance:
     runs-on: ubuntu-latest
     steps:
       - name: Install OCI dependencies
         run: pip install oci
-
       - name: Try to create Oracle instance
         env:
           OCI_USER: ${{ secrets.OCI_USER }}
           OCI_FINGERPRINT: ${{ secrets.OCI_FINGERPRINT }}
           OCI_TENANCY: ${{ secrets.OCI_TENANCY }}
-          OCI_REGION: ${{ secrets.OCI_REGION }}
           OCI_KEY_CONTENT: ${{ secrets.OCI_KEY_CONTENT }}
           SUBNET_ID: ${{ secrets.SUBNET_ID }}
           IMAGE_ID: ${{ secrets.IMAGE_ID }}
-          AVAILABILITY_DOMAIN: ${{ secrets.AVAILABILITY_DOMAIN }}
         run: |
           python3 - <<'EOF'
           import oci, os, sys
-          config = {
-            "user": os.environ["OCI_USER"],
-            "fingerprint": os.environ["OCI_FINGERPRINT"],
-            "tenancy": os.environ["OCI_TENANCY"],
-            "region": os.environ["OCI_REGION"],
-            "key_content": os.environ["OCI_KEY_CONTENT"]
+
+          config_base = {
+              "user": os.environ["OCI_USER"],
+              "fingerprint": os.environ["OCI_FINGERPRINT"],
+              "tenancy": os.environ["OCI_TENANCY"],
+              "key_content": os.environ["OCI_KEY_CONTENT"]
           }
-          client = oci.core.ComputeClient(config)
-          details = oci.core.models.LaunchInstanceDetails(
-            compartment_id=os.environ["OCI_TENANCY"],
-            availability_domain=os.environ.get("AVAILABILITY_DOMAIN", "Onva:EU-PARIS-1-AD-1"),
-            display_name="labelwise-oracle-vm",
-            shape="VM.Standard.A1.Flex",
-            shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(ocpus=4, memory_in_gbs=24),
-            source_details=oci.core.models.InstanceSourceViaImageDetails(
-              source_type="image",
-              image_id=os.environ["IMAGE_ID"]
-            ),
-            create_vnic_details=oci.core.models.CreateVnicDetails(
-              subnet_id=os.environ["SUBNET_ID"],
-              assign_public_ip=True
-            )
-          )
-          try:
-            result = client.launch_instance(details)
-            print(f"SUCCESS! Instance OCID: {result.data.id}")
-            sys.exit(0)
-          except oci.exceptions.ServiceError as e:
-            if "Out of host capacity" in str(e.message):
-              print("Still out of capacity. Will retry in 5 minutes.")
-              sys.exit(0)
-            else:
-              print(f"Error: {e}")
-              sys.exit(1)
-          except Exception as e:
-            print(f"Error: {e}")
-            sys.exit(1)
+
+          # Try multiple regions and availability domains
+          regions_and_ads = [
+              ("eu-paris-1",     ["Onva:EU-PARIS-1-AD-1"]),
+              ("eu-frankfurt-1", ["YXoa:EU-FRANKFURT-1-AD-1", "YXoa:EU-FRANKFURT-1-AD-2", "YXoa:EU-FRANKFURT-1-AD-3"]),
+              ("eu-amsterdam-1", ["AhgB:EU-AMSTERDAM-1-AD-1"]),
+              ("uk-london-1",    ["lljP:UK-LONDON-1-AD-1", "lljP:UK-LONDON-1-AD-2", "lljP:UK-LONDON-1-AD-3"]),
+              ("eu-milan-1",     ["hmnl:EU-MILAN-1-AD-1"]),
+              ("eu-stockholm-1", ["spa:EU-STOCKHOLM-1-AD-1"]),
+          ]
+
+          for region, ads in regions_and_ads:
+              config = {**config_base, "region": region}
+              client = oci.core.ComputeClient(config)
+              for ad in ads:
+                  print(f"Trying region={region} AD={ad}...")
+                  details = oci.core.models.LaunchInstanceDetails(
+                      compartment_id=os.environ["OCI_TENANCY"],
+                      availability_domain=ad,
+                      display_name="labelwise-oracle-vm",
+                      shape="VM.Standard.A1.Flex",
+                      shape_config=oci.core.models.LaunchInstanceShapeConfigDetails(
+                          ocpus=4, memory_in_gbs=24
+                      ),
+                      source_details=oci.core.models.InstanceSourceViaImageDetails(
+                          source_type="image",
+                          image_id=os.environ["IMAGE_ID"]
+                      ),
+                      create_vnic_details=oci.core.models.CreateVnicDetails(
+                          subnet_id=os.environ["SUBNET_ID"],
+                          assign_public_ip=True
+                      )
+                  )
+                  try:
+                      result = client.launch_instance(details)
+                      print(f"SUCCESS! Region={region} AD={ad} Instance OCID: {result.data.id}")
+                      sys.exit(0)
+                  except oci.exceptions.ServiceError as e:
+                      msg = str(getattr(e, 'message', e))
+                      if "Out of host capacity" in msg or "out of capacity" in msg.lower() or "NotAuthorizedOrNotFound" in msg:
+                          print(f"  -> No capacity or not available in {region}/{ad}, trying next...")
+                      else:
+                          print(f"  -> Error in {region}/{ad}: {e}")
+                  except Exception as e:
+                      print(f"  -> Unexpected error in {region}/{ad}: {e}")
+
+          print("All regions exhausted. Still out of capacity. Will retry in 5 minutes.")
+          sys.exit(0)
           EOF
